@@ -9,7 +9,6 @@ function showPage(id) {
   document.getElementById('page-' + id).classList.add('active');
   document.querySelector(`.nav-item[data-page="${id}"]`).classList.add('active');
   if (id === 'dashboard') renderDashboard();
-  if (id === 'talentsearch') { populateTalentSearchFilters(); renderTalentSearch(); }
   if (id === 'recommendation') populateVacancyDropdown();
   if (id === 'masterfilter') renderPriorityEditor();
 }
@@ -62,8 +61,6 @@ async function fetchInitialData() {
     if (dataDash.success) {
       vacancyData = dataDash.data;
       renderDashboard();
-      populateTalentSearchFilters();
-      renderTalentSearch();
       populateVacancyDropdown();
     } else {
       console.error("Dashboard error:", dataDash.error);
@@ -137,20 +134,16 @@ function renderDashboard() {
     });
   }
 
-  let total = statsData.length, open = 0, internalPromotion = 0, closed = 0, hold = 0, cancel = 0;
+  let total = statsData.length, open = 0, fulfilled = 0, hold = 0, cancel = 0;
   statsData.forEach(d => {
     if (d.status === 'Open') open++;
-    if (d.status === 'Closed') {
-      closed++;
-      if (String(d.source || '').toLowerCase() === 'internal') internalPromotion++;
-    }
+    if (d.status === 'Closed') fulfilled++;
     if (d.status === 'Hold') hold++;
     if (d.status === 'Cancel') cancel++;
   });
   document.getElementById('statTotal').textContent = total;
   document.getElementById('statOpen').textContent = open;
-  document.getElementById('statFulfilled').textContent = internalPromotion;
-  document.getElementById('statClosed').textContent = closed;
+  document.getElementById('statFulfilled').textContent = fulfilled;
   document.getElementById('statHold').textContent = hold;
   document.getElementById('statCancel').textContent = cancel;
 
@@ -168,8 +161,7 @@ function renderDashboard() {
 
     if (statusFilter === 'OPEN' && d.status !== 'Open') return;
     if (statusFilter === 'HOLD' && d.status !== 'Hold') return;
-    if (statusFilter === 'CLOSED_ONLY' && d.status !== 'Closed') return;
-    if (statusFilter === 'CANCEL' && d.status !== 'Cancel') return;
+    if (statusFilter === 'CLOSED' && (d.status !== 'Closed' && d.status !== 'Cancel')) return;
 
     const searchStr = [d.pemohon, d.posisi, d.region, d.branch, ...(d.talentList || []), ...(d.talentRec || [])].join(' ').toLowerCase();
     if (q && !searchStr.includes(q)) return;
@@ -683,9 +675,14 @@ function generateRecommendation() {
   const N = priorityCfg.order.filter(id => priorityCfg.enabled[id] !== false).length;
   let ptIdx = 0;
 
+  const savedTalentListNames = (vac.talentList || []).map(t => t.toUpperCase().trim());
+
   eligible.forEach(k => {
     k.score = 0;
     k._isTalentRec = isCandidateInTalentList(k.name);
+    // Bersihkan status checked dari vacancy sebelumnya ATAU pre-check jika memang sudah ada di Talent List
+    k._checked = savedTalentListNames.some(t => k.name.toUpperCase().trim() === t);
+
 
     // Assign exponential points per priority position (so priority 1 always beats all lower combined)
     let enabledIdx = 0;
@@ -1286,136 +1283,6 @@ function toggleTiebreaker(id, enabled) {
   cfg.tiebreakerEnabled[id] = enabled;
   savePriorityConfig(cfg);
   renderPriorityEditor();
-}
-
-// ══════════════════════════════════════════
-// === TALENT SEARCH PAGE ==================
-// ══════════════════════════════════════════
-
-function populateTalentSearchFilters() {
-  if (!HAV_DB || HAV_DB.length === 0) return;
-
-  const depts = [...new Set(HAV_DB.map(k => k.department).filter(Boolean))].sort();
-  const regions = [...new Set(HAV_DB.map(k => k.regional).filter(Boolean))].sort();
-  const grades = [...new Set(HAV_DB.map(k => k.grade).filter(Boolean))].sort();
-  const principles = [...new Set(HAV_DB.map(k => k.principal).filter(Boolean))].sort();
-
-  const fill = (id, vals) => {
-    const el = document.getElementById(id);
-    if (!el) return;
-    const first = el.options[0];
-    el.innerHTML = '';
-    el.appendChild(first);
-    vals.forEach(v => {
-      const o = document.createElement('option');
-      o.value = v; o.textContent = v;
-      el.appendChild(o);
-    });
-  };
-
-  fill('tsFilterDept', depts);
-  fill('tsFilterRegion', regions);
-  fill('tsFilterGrade', grades);
-  fill('tsFilterPrinciple', principles);
-}
-
-function resetTalentSearchFilters() {
-  ['tsFilterDept', 'tsFilterRegion', 'tsFilterGrade', 'tsFilterPrinciple'].forEach(id => {
-    const el = document.getElementById(id);
-    if (el) el.value = '';
-  });
-  const s = document.getElementById('tsSearch');
-  if (s) s.value = '';
-  renderTalentSearch();
-}
-
-function renderTalentSearch() {
-  const dept = document.getElementById('tsFilterDept')?.value || '';
-  const region = document.getElementById('tsFilterRegion')?.value || '';
-  const grade = document.getElementById('tsFilterGrade')?.value || '';
-  const principle = document.getElementById('tsFilterPrinciple')?.value || '';
-  const q = (document.getElementById('tsSearch')?.value || '').toLowerCase();
-
-  const body = document.getElementById('tsBody');
-  const noRes = document.getElementById('tsNoResult');
-  const countEl = document.getElementById('tsResultCount');
-  if (!body) return;
-
-  let results = HAV_DB.filter(k => {
-    if (dept && k.department !== dept) return false;
-    if (region && k.regional !== region) return false;
-    if (grade && k.grade !== grade) return false;
-    if (principle && k.principal !== principle) return false;
-    if (q && ![k.nik, k.name, k.branch, k.position, k.grade].join(' ').toLowerCase().includes(q)) return false;
-    return true;
-  });
-
-  countEl.textContent = results.length + ' candidate(s) found';
-
-  if (results.length === 0) {
-    body.innerHTML = '';
-    noRes.classList.remove('hidden');
-    return;
-  }
-  noRes.classList.add('hidden');
-
-  let html = '';
-  results.forEach((k, i) => {
-    // Phone link
-    let phoneLink = '-';
-    if (k.phone) {
-      let raw = String(k.phone).replace(/[^\d]/g, '');
-      if (raw.startsWith('0')) raw = '62' + raw.substring(1);
-      else if (raw.startsWith('8')) raw = '62' + raw;
-      if (raw.length >= 10) phoneLink = `<a href="https://wa.me/${raw}" target="_blank" style="color:var(--primary);text-decoration:none;font-weight:600;font-size:12px;">📱 ${raw}</a>`;
-    }
-
-    // Emp status badge
-    let empBadge = k.employeeStatus || '-';
-    const esLow = String(k.employeeStatus || '').toLowerCase();
-    if (esLow.includes('permanent') || esLow.includes('tetap')) empBadge = '<span style="background:#dcfce7;color:#166534;padding:2px 8px;border-radius:4px;font-size:11px;font-weight:600">Permanent</span>';
-    else if (esLow.includes('acting')) empBadge = '<span style="background:#fef3c7;color:#92400e;padding:2px 8px;border-radius:4px;font-size:11px;font-weight:600">Acting</span>';
-    else if (esLow.includes('contract') || esLow.includes('kontrak')) empBadge = '<span style="background:#fee2e2;color:#991b1b;padding:2px 8px;border-radius:4px;font-size:11px;font-weight:600">Contract</span>';
-
-    // Keinginan promosi badge
-    const kRaw = String(k.keinginanPromosi || '').trim();
-    let kCell = '<span style="color:#94a3b8;font-size:11px;font-style:italic">-</span>';
-    if (kRaw) {
-      const kLow = kRaw.toLowerCase();
-      const kBg = (kLow === 'tidak bersedia' || kLow.startsWith('tidak')) ? '#fee2e2' : '#dcfce7';
-      const kCol = (kLow === 'tidak bersedia' || kLow.startsWith('tidak')) ? '#991b1b' : '#166634';
-      kCell = `<span style="background:${kBg};color:${kCol};padding:3px 10px;border-radius:6px;font-size:11px;font-weight:700;">${kRaw}</span>`;
-    }
-
-    const kesCell = k.kesediaanPenempatan
-      ? `<span style="font-size:11px;color:#374151;">${k.kesediaanPenempatan}</span>`
-      : '<span style="color:#94a3b8;font-size:11px;font-style:italic">-</span>';
-
-    html += `<tr>
-      <td><span class="row-num">${i + 1}</span></td>
-      <td style="font-weight:600;font-size:12px;">${k.nik}</td>
-      <td style="font-weight:600;">${k.name}</td>
-      <td style="text-align:center">${k.age || '-'}</td>
-      <td style="font-size:12px;">${k.education || '-'}</td>
-      <td>${empBadge}</td>
-      <td style="font-size:12px;">${k.position}</td>
-      <td><span style="background:#eef2ff;color:var(--primary-dark);padding:2px 8px;border-radius:4px;font-weight:700;font-size:11px">${k.grade}</span></td>
-      <td style="font-size:12px;">${k.principal || '-'}</td>
-      <td style="font-size:12px;">${k.regional || '-'}</td>
-      <td style="font-weight:600;font-size:12px;">${k.branch}</td>
-      <td style="font-size:12px;">${k.department || '-'}</td>
-      <td>${phoneLink}</td>
-      <td><span style="font-weight:700;${k.rating === 'R1' ? 'color:#065f46;' : k.rating === 'R2' ? 'color:#1e40af;' : 'color:#6b7280;'}">${k.rating}</span></td>
-      <td style="text-align:center;font-weight:600;">${Number(k.ap12m).toFixed(2)}</td>
-      <td style="font-size:12px;">${k.psiCur || '-'}</td>
-      <td style="font-weight:700;color:var(--primary-dark)">${k.havProyeksi || '-'}</td>
-      <td><span style="color:${k.p2k === 'Lulus' ? 'var(--success)' : 'var(--danger)'};font-weight:700">${k.p2k}</span></td>
-      <td style="font-size:12px;">${k.lengthOfService || '-'}</td>
-      <td>${kCell}</td>
-      <td>${kesCell}</td>
-    </tr>`;
-  });
-  body.innerHTML = html;
 }
 
 // --- INIT ---
